@@ -560,7 +560,6 @@ void printResults(SandboxDetector* detector) {
     }
     int percentage = (detector->resultCount > 0) ? (detectedCount * 100) / detector->resultCount : 0;
     printf("Detection ratio: %d/%d (%d%%)\n", detectedCount, detector->resultCount, percentage);
-    printf("\nby ARXHR007\n");
 
 }
 int main() {
