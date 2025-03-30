@@ -11,7 +11,7 @@ The cybersecurity landscape features an ongoing battle between security research
 > To maintain technical accuracy, I’ve used terminology that might be challenging for non-tech-savvy readers—apologies! 
 > If any part seems unclear, you can copy and paste it into ChatGPT for a simplified breakdown.🙃
 
-## To this repo, I have attached a C [program](https://) that demonstrates the practical implementation of some of the techniques listed below.
+## To this repo, I have attached a C [program](https://github.com/arxhr007/Malware-Sandbox-Evasion/blob/main/sandbox_detector.c) that demonstrates the practical implementation of some of the techniques listed below.
 
 ## Compilation Instructions :
 ```
@@ -19,7 +19,7 @@ $ gcc -o sandbox_detector.exe sandbox_detector.c -lws2_32 -liphlpapi
 $ .\sandbox_detector.exe
 ``` 
 
-Additionally, [```sandbox_detector.exe```](https://github.com/arxhr007/test/edit/main/README.md) is provided if you want to run it directly without compiling.
+Additionally, [```sandbox_detector.exe```](https://github.com/arxhr007/Malware-Sandbox-Evasion/raw/refs/heads/main/sandbox_detector.exe) is provided if you want to run it directly without compiling.
 
 > [!note]
 > I feel the need to clarify that I am not a professional—far from it. I'll be making plenty of mistakes as I’m still new to this, and I don’t claim that my code is the best, the most efficient, or that I’ve invented any of these techniques. 🙃
