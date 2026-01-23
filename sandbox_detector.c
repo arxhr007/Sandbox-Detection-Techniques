@@ -18,12 +18,12 @@ By ARXHR007 ;)
 */
 
 #define _WIN32_WINNT 0x0600
+#include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <winsock2.h>
 #include <iphlpapi.h>
 #include <time.h>
 #include <shlobj.h>
@@ -34,11 +34,7 @@ By ARXHR007 ;)
 #include <ctype.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
-#ifndef GetTickCount64
-ULONGLONG GetTickCount64(void) {
-    return (ULONGLONG)GetTickCount();
-}
-#endif
+
 typedef struct {
     char category[32];
     char test[64];
