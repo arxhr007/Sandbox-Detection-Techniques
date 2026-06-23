@@ -2,13 +2,18 @@
 ################################################################################################
 NOTE:
 
-This is just a proof-of-concept code that demonstrates some methods APT level malware uses to detect a sandbox environment.  
-ex: mouse movments , process analysis like x64dbg , memory and hardware size etc
-When applying it in the real world, all of this code needs to be obfuscated and requires extensive AV/EDR evasion techniques.
+Educational proof-of-concept for malware analysts, blue teams, and sandbox developers.
+It demonstrates the environment checks malware commonly uses to recognize an analysis
+sandbox (e.g. mouse movement, process analysis like x64dbg, memory and hardware size),
+so defenders can recognize and harden against these techniques.
 
-kindly read the README.md inorder to understand the code
+This is a non-operational reference: it only runs detection checks and prints results.
+It contains no payload, no obfuscation, no AV/EDR evasion, and no malicious behavior.
+Run it only inside a disposable VM you control.
 
-also this code contain only some techniques I mentioned about in the notes also some i didn't mentioned
+kindly read the README.md in order to understand the code
+
+this code contains only some of the techniques mentioned in the notes, and some that aren't
 
 ################################################################################################
 
