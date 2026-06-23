@@ -55,17 +55,18 @@ SandboxDetector* newSandboxDetector() {
     SandboxDetector* detector = (SandboxDetector*)malloc(sizeof(SandboxDetector));
     detector->capacity = 20;
     detector->resultCount = 0;
-    detector->results = (DetectionResult*)malloc(sizeof(DetectionResult) * detector->capacity);
+    detector->results = (DetectionResult*)calloc(detector->capacity, sizeof(DetectionResult));
     detector->isInSandbox = false;
     return detector;
 }
 void addResult(SandboxDetector* detector, const char* category, const char* test, bool detected) {
     if (detector->resultCount >= detector->capacity) {
+        if (detector->capacity > INT_MAX / 2) return;
         detector->capacity *= 2;
         detector->results = (DetectionResult*)realloc(detector->results, sizeof(DetectionResult) * detector->capacity);
     }
-    strcpy(detector->results[detector->resultCount].category, category);
-    strcpy(detector->results[detector->resultCount].test, test);
+    strcpy_s(detector->results[detector->resultCount].category, sizeof(detector->results[0].category), category);
+    strcpy_s(detector->results[detector->resultCount].test, sizeof(detector->results[0].test), test);
     detector->results[detector->resultCount].detected = detected;
     detector->resultCount++;
     if (detected) {
@@ -136,7 +137,7 @@ bool hasVirtualMacAddress() {
     while (current) {
         if (current->PhysicalAddressLength == 6) {
             char macAddr[18];
-            sprintf(macAddr, "%02X-%02X-%02X-%02X-%02X-%02X",
+            snprintf(macAddr, sizeof(macAddr), "%02X-%02X-%02X-%02X-%02X-%02X",
                 current->PhysicalAddress[0], current->PhysicalAddress[1],
                 current->PhysicalAddress[2], current->PhysicalAddress[3],
                 current->PhysicalAddress[4], current->PhysicalAddress[5]);
@@ -367,7 +368,7 @@ bool checkRecentFiles() {
     SHGetFolderPathA(NULL, CSIDL_RECENT, NULL, 0, recentPath);
     WIN32_FIND_DATAA findData;
     char searchPath[MAX_PATH];
-    sprintf(searchPath, "%s\\*.lnk", recentPath);
+    snprintf(searchPath, sizeof(searchPath), "%s\\*.lnk", recentPath);
     HANDLE hFind = FindFirstFileA(searchPath, &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
         return true; 
