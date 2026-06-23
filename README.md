@@ -1,10 +1,11 @@
 # Advanced Techniques used for Sandbox Detection and Evasion: A Technical Guide 👾
 ## Introduction
 
-The cybersecurity landscape features an ongoing battle between security researchers using sandboxed environments to analyze malicious code and  developers implementing sophisticated detection and evasion mechanisms. This technical guide explores the specific methods  employs to identify analysis environments and the countermeasures it uses to evade detection.
+The cybersecurity landscape features an ongoing battle between security researchers using sandboxed environments to analyze malicious code and malware developers implementing sophisticated detection and evasion mechanisms. This technical guide explores the specific methods malware employs to identify analysis environments and the countermeasures it uses to evade detection.
 
 > [!warning]
-> The information, scripts, or instructions provided are for educational purposes only.
+> **Educational & defensive-research use only.**
+> This repository documents how malware *detects* analysis environments so that **malware analysts, blue teams, sandbox developers, and CTF players** can recognize and counter these techniques. It is a technical reference and a non-operational proof of concept — it contains **no payload, no command-and-control, and no real-world weaponized capability**. Do not use any of this material to harm systems you do not own or are not authorized to test. By using this repo you accept full responsibility for your actions; the author is not liable for misuse. See [`LICENSE`](LICENSE).
 
 > [!tip]
 > Knowledge of OS internals and Low-Level programming will help you grasp these concepts more effectively.
@@ -19,7 +20,8 @@ $ gcc -o sandbox_detector.exe sandbox_detector.c -lws2_32 -liphlpapi
 $ .\sandbox_detector.exe
 ``` 
 
-Additionally, [```sandbox_detector.exe```](https://github.com/arxhr007/Sandbox-Detection-Techniques/raw/refs/heads/main/sandbox_detector.exe) is provided if you want to run it directly without compiling.
+> [!important]
+> No pre-compiled binary is distributed. Build from source yourself in a disposable VM if you wish to observe the checks. This keeps the repository source-only and auditable.
 
 > [!note]
 > I feel the need to clarify that I am not a professional—far from it. I'll be making plenty of mistakes as I’m still new to this, and I don’t claim that my code is the best, the most efficient, or that I’ve invented any of these techniques. 🙃
@@ -30,7 +32,7 @@ Additionally, [```sandbox_detector.exe```](https://github.com/arxhr007/Sandbox-D
 
 ### Virtual Processor Anomalies
 
- conducts CPU-level detection through multiple techniques:
+Malware conducts CPU-level detection through multiple techniques:
 
 - **CPUID instruction analysis**: Examining vendor strings (e.g., "VMwareVMware") and hypervisor-specific bits (bit 31 in ECX) via the `cpuid` instruction
 - **Timing discrepancies**: Using `rdtsc` to measure execution time of virtualization-sensitive operations and comparing against expected thresholds
@@ -38,11 +40,11 @@ Additionally, [```sandbox_detector.exe```](https://github.com/arxhr007/Sandbox-D
 - **Red Pill technique**: Executing the `sidt` instruction to locate the Interrupt Descriptor Table, which differs in location between host and guest systems
 - **Control register examination**: Reading CR0, CR3, and CR4 registers for virtualization flags and unexpected bits
 
-Advanced  implementations typically chain multiple CPU detection methods for higher reliability.
+Advanced malware implementations typically chain multiple CPU detection methods for higher reliability.
 
 ### API Hooking Detection
 
-Sandbox monitoring relies on function interception, which  aims to identify:
+Sandbox monitoring relies on function interception, which malware aims to identify:
 
 - **Function prologue verification**: Examining the first 5-7 bytes of critical Windows API functions for JMP or CALL instructions indicating hooks
 - **In-memory checksum validation**: Computing hash values of memory-resident code and comparing with expected values
@@ -50,7 +52,7 @@ Sandbox monitoring relies on function interception, which  aims to identify:
 - **Shadow API verification**: Testing secondary entry points (e.g., Nt* vs. Zw* functions) for inconsistent behavior
 - **IAT/EAT examination**: Analyzing import and export address tables in PE headers for modifications indicating hooks
 
-Once hooks are detected, evasive  can employ alternative code paths or attempt hook removal.
+Once hooks are detected, evasive malware can employ alternative code paths or attempt hook removal.
 
 ### Execution Environment Analysis
 
@@ -67,7 +69,7 @@ These checks are often performed early in execution to enable immediate terminat
 
 ### Debugging Detection Techniques
 
-Sophisticated  employs multiple debugger detection methods:
+Sophisticated malware employs multiple debugger detection methods:
 
 - **Trap flag testing**: Setting and monitoring the processor trap flag (TF) in the EFLAGS register
 - **Debug register inspection**: Checking DR0-DR7 registers for breakpoint addresses using assembly-level access
@@ -228,7 +230,7 @@ External network tests identify sandboxes with limited, monitored, or simulated 
 
 ### Temporal Evasion Strategies
 
-Timing-based methods enable  to outlast analysis windows:
+Timing-based methods enable malware to outlast analysis windows:
 
 - **Multi-stage sleep chains**: Implementing nested `Sleep`, `WaitForSingleObject`, or `timeSetEvent` calls
 - **External event monitoring**: Waiting for system reboots, user logins, or specific system events
@@ -263,7 +265,7 @@ Bypassing monitored functions prevents hook-based analysis:
 - **Inline assembly alternatives**: Recreating API functionality with low-level assembly code
 - **Alternative API routes**: Using uncommon Native API alternatives for common operations
 - **Dynamic API resolution**: Resolving function addresses at runtime through hashing or CRC-based lookups
-- **Stolen code execution**: Executing copies of system code in  memory space to avoid hooks
+- **Stolen code execution**: Executing copies of system code in its own memory space to avoid hooks
 - **Anti-API-hook guard pages**: Implementing memory protection via `VirtualProtect` to prevent hook installation
 
 Custom API implementation effectively bypasses most hook-based monitoring systems.
@@ -310,7 +312,7 @@ Modern sandbox development focuses on detection avoidance:
 - **Nested virtualization**: Implementing layered virtualization to obscure detection
 - **Bare-metal analysis**: Using physical hardware for high-value targets to eliminate virtualization indicators
 
-As  evasion evolves, analysis platforms continuously adapt their concealment techniques.
+As malware evasion evolves, analysis platforms continuously adapt their concealment techniques.
 
 ### Hook Concealment Strategies
 
@@ -324,18 +326,18 @@ Advanced monitoring techniques prioritize stealth:
 - **Path diversion techniques**: Redirecting execution without modifying function code
 - **Trap-based monitoring**: Using processor traps instead of code modification for interception
 
-Hook concealment represents the cutting edge in the ongoing  analysis arms race.
+Hook concealment represents the cutting edge in the ongoing malware analysis arms race.
 
 ## Conclusion
 
-The techniques described in this guide represent the technical landscape of  sandbox detection and evasion. Modern malicious code typically employs multiple detection vectors with complex decision trees, requiring analysts to address numerous evasion techniques simultaneously.
+The techniques described in this guide represent the technical landscape of malware sandbox detection and evasion. Modern malicious code typically employs multiple detection vectors with complex decision trees, requiring analysts to address numerous evasion techniques simultaneously.
 
-The most sophisticated threats combine temporal evasion, environmental fingerprinting, and external verification to create significant challenges for automated analysis systems. Effective  analysis requires a multi-faceted approach combining traditional sandboxing with bare-metal analysis, network simulation, and specialized hypervisor technologies.
+The most sophisticated threats combine temporal evasion, environmental fingerprinting, and external verification to create significant challenges for automated analysis systems. Effective malware analysis requires a multi-faceted approach combining traditional sandboxing with bare-metal analysis, network simulation, and specialized hypervisor technologies.
 
 By understanding the technical details of evasion techniques, security professionals can develop more comprehensive detection and analysis strategies to counter increasingly sophisticated .
 
 ## Contributing  
-Contributions are welcome! If you have insights, corrections, or additional techniques related to  evasion, feel free to submit a pull request or open an issue.  
+Contributions are welcome! If you have insights, corrections, or additional techniques related to malware evasion, feel free to submit a pull request or open an issue.  
 
 Let's build a comprehensive resource together! 🚀  
 
