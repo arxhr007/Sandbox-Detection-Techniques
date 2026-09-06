@@ -1,4 +1,7 @@
 # Advanced Techniques used for Sandbox Detection and Evasion: A Technical Guide 👾
+
+[![CI](https://github.com/arxhr007/Sandbox-Detection-Techniques/actions/workflows/ci.yml/badge.svg)](https://github.com/arxhr007/Sandbox-Detection-Techniques/actions/workflows/ci.yml)
+
 ## Introduction
 
 The cybersecurity landscape features an ongoing battle between security researchers using sandboxed environments to analyze malicious code and malware developers implementing sophisticated detection and evasion mechanisms. This technical guide explores the specific methods malware employs to identify analysis environments and the countermeasures it uses to evade detection.
@@ -34,7 +37,16 @@ The cybersecurity landscape features an ongoing battle between security research
 
 ## The Demo Program
 
-This repo ships a C [program](https://github.com/arxhr007/Sandbox-Detection-Techniques/blob/main/sandbox_detector.c) that demonstrates a practical implementation of *some* of the techniques listed below. It only runs checks and prints results — no payload, no evasion.
+This repo ships a small C program that demonstrates a practical implementation of *some* of the techniques listed below. It only runs checks and prints results — no payload, no evasion.
+
+The source is split into a Win32-free scoring [core](https://github.com/arxhr007/Sandbox-Detection-Techniques/tree/main/src) and the OS-specific probes:
+
+```
+src/detector.c   # weighted scoring + output (pure C, unit-tested)
+src/checks.c     # all Win32 VM/sandbox/debugger probes + runTests()
+src/main.c       # CLI parsing + entry point
+tests/           # portable unit tests for the scoring core
+```
 
 ### Compilation Instructions
 
@@ -44,27 +56,43 @@ Using the provided `Makefile`:
 ```
 $ make          # builds sandbox_detector.exe with -Wall -Wextra -O2
 $ make run      # build + run
+$ make test     # build + run the portable unit tests (any C compiler)
 $ make clean
 ```
 
 Or directly:
 ```
-$ gcc -Wall -Wextra -O2 -o sandbox_detector.exe sandbox_detector.c -lws2_32 -liphlpapi
+$ gcc -Wall -Wextra -O2 -Isrc -o sandbox_detector.exe src/detector.c src/checks.c src/main.c -lws2_32 -liphlpapi
 $ .\sandbox_detector.exe
 ```
 
 > [!important]
 > No pre-compiled binary is distributed. Build from source yourself in a disposable VM if you wish to observe the checks. This keeps the repository source-only and auditable.
 
+### Command-Line Options
+
+```
+--json           Emit results as a JSON object (implies --no-wait)
+--quiet          Print only the final verdict lines (implies --no-wait)
+--threshold N    Override the sandbox score threshold (default 5)
+--no-wait        Do not wait for a keypress before exiting
+--help           Show usage
+```
+
+The process exit code is scriptable: **0** = genuine environment, **3** = sandbox detected. Example:
+```
+$ ./sandbox_detector.exe --json --no-wait | jq .is_sandbox
+```
+
 ### How the Verdict Works (Weighted Scoring)
 
-Rather than "any single hit = sandbox" (which false-positives on genuine low-end machines), each of the 21 checks carries a **weight** and only contributes when it fires:
+Rather than "any single hit = sandbox" (which false-positives on genuine low-end machines), each of the 27 checks carries a **weight** and only contributes when it fires:
 
 | Weight | Meaning | Examples |
 |---|---|---|
-| **3 — strong** | near-definitive VM/analysis artifact | VM driver files, VM processes/services, VM MAC prefix, BIOS vendor strings, VM registry keys |
-| **2 — medium** | suggestive signal | sandbox artifacts/hostnames, debugger ports, analysis tools running, timing anomaly, hypervisor CPUID bit* |
-| **1 — weak** | environmental hint only | low RAM/CPU, small disk, low resolution, no mouse/keyboard activity, short uptime, few recent files |
+| **3 — strong** | near-definitive VM/analysis artifact | VM driver files, VM processes/services, VM MAC prefix, BIOS vendor strings, VM registry keys, hypervisor CPUID *vendor* string |
+| **2 — medium** | suggestive signal | sandbox artifacts/hostnames, injected sandbox DLLs, debugger present, hardware breakpoints, ntdll API hooks, debugger ports, analysis tools, timing anomaly, hypervisor CPUID bit* |
+| **1 — weak** | environmental hint only | low RAM/CPU, small disk, low resolution, no mouse/keyboard activity, short uptime, few recent files, Red Pill/IDT |
 
 The detected weights are summed; the verdict fires when the score reaches the tunable `SANDBOX_SCORE_THRESHOLD` (default **5**). This requires corroboration — e.g. one strong signal plus a medium, not a lone weak hint — before declaring a sandbox.
 
@@ -77,26 +105,33 @@ The detected weights are summed; the verdict fires when the score reaches the tu
 
 --- Runtime Tests ---
 Time Acceleration                (weight 2): Not detected
-Hypervisor Detected              (weight 2): Detected!
+Hypervisor Bit (CPUID)           (weight 2): Detected!
+Hypervisor Vendor (CPUID)        (weight 3): Detected!
 ...
 --- Hardware Tests ---
 Virtual MAC Address              (weight 3): Detected!
 ...
 
 ==== Overall Assessment ====
-Weighted score: 11 / 41 (threshold 5)
+Weighted score: 13 / 53 (threshold 5)
 WARNING: System appears to be running in a sandbox or virtual environment!
 
-Detection ratio: 6/21 checks fired (28%)
+Detection ratio: 7/27 checks fired (25%)
 ```
 
 ### Code &harr; Technique Mapping
 
-Which functions in `sandbox_detector.c` implement which techniques from this guide:
+Which functions in `src/checks.c` implement which techniques from this guide:
 
 | Guide technique | Function | Weight | ATT&CK |
 |---|---|---|---|
 | Hypervisor CPUID bit (ECX bit 31) | `isRunningInHypervisor` | 2 | T1497.001 |
+| Hypervisor CPUID vendor string (leaf 0x40000000) | `detectHypervisorVendor` | 3 | T1497.001 |
+| Red Pill — IDT location via `sidt` | `detectRedPillIDT` | 1 | T1497.001 |
+| Debugger attached (`IsDebuggerPresent`) | `detectDebuggerPresent` | 2 | T1622 |
+| Hardware breakpoints (DR0–DR3) | `detectHardwareBreakpoints` | 2 | T1622 |
+| Inline API hooks on ntdll stubs | `detectApiHooks` | 2 | T1622 / T1497.001 |
+| Injected sandbox/monitor DLLs | `detectSandboxDLLs` | 2 | T1497.001 |
 | Timing / time-acceleration anomaly | `checkTimeAcceleration` | 2 | T1497.003 |
 | VM registry keys / SCSI identifiers | `detectVMwareRegistryKeys`, `checkRegistry` | 3 | T1497.001 / T1082 |
 | VM driver / DLL files present | `detectVirtualFiles` | 3 | T1497.001 |
@@ -112,7 +147,7 @@ Which functions in `sandbox_detector.c` implement which techniques from this gui
 | Analysis tools running (procmon, wireshark, x64dbg) | `detectAdditionalProcesses` | 2 | T1497.001 / T1057 |
 | Debugger ports on loopback | `detectDebuggingPorts` | 2 | T1497 |
 
-**Documented here but *not* implemented in the demo** (left as reading exercises): Red Pill / `sidt` IDT-location, debug-register (DR0–DR7) checks, API-hook / function-prologue inspection, direct syscall / `NtQueryInformationProcess` parent-PID checks, WMI queries, and all of the [evasion](#advanced-evasion-techniques) techniques.
+**Documented here but *not* implemented in the demo** (left as reading exercises): trap-flag / `int 2d` debugger checks, self-modifying / anti-stepping code, direct syscall (`SYSCALL`/`SYSENTER`) implementation, `NtQueryInformationProcess` parent-PID / debug-object checks, WMI queries, in-memory checksum validation, and all of the [evasion](#advanced-evasion-techniques) techniques.
 
 > [!note]
 > I feel the need to clarify that I am not a professional—far from it. I'll be making plenty of mistakes as I’m still new to this, and I don’t claim that my code is the best, the most efficient, or that I’ve invented any of these techniques. 🙃

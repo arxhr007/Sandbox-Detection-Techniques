@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-windows:
+    name: Build (Windows, MinGW-w64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MinGW-w64
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+      - name: Build
+        run: mingw32-make
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox_detector
+          path: sandbox_detector.exe
+
+  test:
+    name: Unit tests (portable core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run tests
+        run: make test
