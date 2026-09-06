@@ -12,16 +12,107 @@ The cybersecurity landscape features an ongoing battle between security research
 > To maintain technical accuracy, I’ve used terminology that might be challenging for non-tech-savvy readers—apologies! 
 > If any part seems unclear, you can copy and paste it into ChatGPT for a simplified breakdown.🙃
 
-## To this repo, I have attached a C [program](https://github.com/arxhr007/Sandbox-Detection-Techniques/blob/main/sandbox_detector.c) that demonstrates the practical implementation of some of the techniques listed below.
+## Table of Contents
 
-## Compilation Instructions :
+- [The Demo Program](#the-demo-program)
+  - [Compilation Instructions](#compilation-instructions)
+  - [How the Verdict Works (Weighted Scoring)](#how-the-verdict-works-weighted-scoring)
+  - [Sample Output](#sample-output)
+  - [Code &harr; Technique Mapping](#code--technique-mapping)
+- [Runtime Environment Detection Techniques](#runtime-environment-detection-techniques)
+- [System Environment Analysis](#system-environment-analysis)
+- [User Environment Detection](#user-environment-detection)
+- [Network Environment Analysis](#network-environment-analysis)
+- [Advanced Evasion Techniques](#advanced-evasion-techniques)
+- [Counter-Counter-Evasion Techniques](#counter-counter-evasion-techniques)
+- [Conclusion](#conclusion)
+- [Contributing](#contributing)
+
+> Detection techniques below are tagged with the relevant [MITRE ATT&CK](https://attack.mitre.org/) IDs, primarily **[T1497](https://attack.mitre.org/techniques/T1497/) — Virtualization/Sandbox Evasion** (and its sub-techniques) and **[T1082](https://attack.mitre.org/techniques/T1082/) — System Information Discovery**.
+
+---
+
+## The Demo Program
+
+This repo ships a C [program](https://github.com/arxhr007/Sandbox-Detection-Techniques/blob/main/sandbox_detector.c) that demonstrates a practical implementation of *some* of the techniques listed below. It only runs checks and prints results — no payload, no evasion.
+
+### Compilation Instructions
+
+Requires **[MinGW-w64](https://www.mingw-w64.org/)** (native or cross toolchain). The program uses Vista+ Win32 APIs (`GetAdaptersAddresses`, `GetTickCount64`, `EnumServicesStatusEx`), so the legacy MinGW.org toolchain will not build it.
+
+Using the provided `Makefile`:
 ```
-$ gcc -o sandbox_detector.exe sandbox_detector.c -lws2_32 -liphlpapi
+$ make          # builds sandbox_detector.exe with -Wall -Wextra -O2
+$ make run      # build + run
+$ make clean
+```
+
+Or directly:
+```
+$ gcc -Wall -Wextra -O2 -o sandbox_detector.exe sandbox_detector.c -lws2_32 -liphlpapi
 $ .\sandbox_detector.exe
-``` 
+```
 
 > [!important]
 > No pre-compiled binary is distributed. Build from source yourself in a disposable VM if you wish to observe the checks. This keeps the repository source-only and auditable.
+
+### How the Verdict Works (Weighted Scoring)
+
+Rather than "any single hit = sandbox" (which false-positives on genuine low-end machines), each of the 21 checks carries a **weight** and only contributes when it fires:
+
+| Weight | Meaning | Examples |
+|---|---|---|
+| **3 — strong** | near-definitive VM/analysis artifact | VM driver files, VM processes/services, VM MAC prefix, BIOS vendor strings, VM registry keys |
+| **2 — medium** | suggestive signal | sandbox artifacts/hostnames, debugger ports, analysis tools running, timing anomaly, hypervisor CPUID bit* |
+| **1 — weak** | environmental hint only | low RAM/CPU, small disk, low resolution, no mouse/keyboard activity, short uptime, few recent files |
+
+The detected weights are summed; the verdict fires when the score reaches the tunable `SANDBOX_SCORE_THRESHOLD` (default **5**). This requires corroboration — e.g. one strong signal plus a medium, not a lone weak hint — before declaring a sandbox.
+
+> \*The hypervisor CPUID bit is only weight 2 on purpose: modern Windows 11 sets it via Hyper-V/VBS on real hardware, so it is not definitive on its own.
+
+### Sample Output
+
+```
+==== Sandbox Detection Results ====
+
+--- Runtime Tests ---
+Time Acceleration                (weight 2): Not detected
+Hypervisor Detected              (weight 2): Detected!
+...
+--- Hardware Tests ---
+Virtual MAC Address              (weight 3): Detected!
+...
+
+==== Overall Assessment ====
+Weighted score: 11 / 41 (threshold 5)
+WARNING: System appears to be running in a sandbox or virtual environment!
+
+Detection ratio: 6/21 checks fired (28%)
+```
+
+### Code &harr; Technique Mapping
+
+Which functions in `sandbox_detector.c` implement which techniques from this guide:
+
+| Guide technique | Function | Weight | ATT&CK |
+|---|---|---|---|
+| Hypervisor CPUID bit (ECX bit 31) | `isRunningInHypervisor` | 2 | T1497.001 |
+| Timing / time-acceleration anomaly | `checkTimeAcceleration` | 2 | T1497.003 |
+| VM registry keys / SCSI identifiers | `detectVMwareRegistryKeys`, `checkRegistry` | 3 | T1497.001 / T1082 |
+| VM driver / DLL files present | `detectVirtualFiles` | 3 | T1497.001 |
+| VM processes (vmtoolsd, VBoxService) | `detectVMProcesses` | 3 | T1497.001 / T1057 |
+| VM services (VMTools, VBoxService) | `detectVirtualServices` | 3 | T1497.001 |
+| BIOS / manufacturer strings | `detectDeviceBios` | 3 | T1497.001 / T1082 |
+| Sandbox artifact paths | `checkSandboxArtifacts` | 2 | T1497.001 |
+| Sandbox hostnames | `checkSandboxHostnames` | 2 | T1497.001 / T1082 |
+| VM MAC address prefixes | `hasVirtualMacAddress` | 3 | T1497.001 |
+| Low RAM / CPU / disk | `detectHardwareConfigurations`, `checkDriveSize` | 1 | T1497.001 / T1082 |
+| Low screen resolution | `checkScreenResolution` | 1 | T1497.001 |
+| Mouse / keyboard / idle / uptime / recent-files | `checkMouseMovement`, `checkNoKeyboardActivity`, `checkUserActivity`, `checkSystemUptime`, `checkRecentFiles` | 1 | T1497.002 |
+| Analysis tools running (procmon, wireshark, x64dbg) | `detectAdditionalProcesses` | 2 | T1497.001 / T1057 |
+| Debugger ports on loopback | `detectDebuggingPorts` | 2 | T1497 |
+
+**Documented here but *not* implemented in the demo** (left as reading exercises): Red Pill / `sidt` IDT-location, debug-register (DR0–DR7) checks, API-hook / function-prologue inspection, direct syscall / `NtQueryInformationProcess` parent-PID checks, WMI queries, and all of the [evasion](#advanced-evasion-techniques) techniques.
 
 > [!note]
 > I feel the need to clarify that I am not a professional—far from it. I'll be making plenty of mistakes as I’m still new to this, and I don’t claim that my code is the best, the most efficient, or that I’ve invented any of these techniques. 🙃
@@ -29,6 +120,8 @@ $ .\sandbox_detector.exe
 ---
 
 # Runtime Environment Detection Techniques
+
+> `ATT&CK:` T1497.001 (System Checks), T1497.003 (Time Based Evasion), T1622 (Debugger Evasion)
 
 ### Virtual Processor Anomalies
 
@@ -81,6 +174,8 @@ Sophisticated malware employs multiple debugger detection methods:
 These techniques specifically target interactive analysis rather than automated sandbox execution.
 
 ## System Environment Analysis
+
+> `ATT&CK:` T1497.001 (System Checks), T1082 (System Information Discovery), T1057 (Process Discovery), T1518.001 (Security Software Discovery)
 
 ### Operating System Artifacts
 
@@ -140,6 +235,8 @@ Memory testing reveals simplified environments configured with minimal resources
 
 ## User Environment Detection
 
+> `ATT&CK:` T1497.002 (User Activity Based Checks), T1082 (System Information Discovery)
+
 ### Human Interaction Analysis
 
 Real systems demonstrate human usage patterns:
@@ -184,6 +281,8 @@ Usage pattern analysis effectively identifies purpose-built analysis environment
 
 ## Network Environment Analysis
 
+> `ATT&CK:` T1497 (Virtualization/Sandbox Evasion), T1016 (System Network Configuration Discovery), T1016.001 (Internet Connection Discovery)
+
 ### Connectivity Assessment
 
 Network configuration reveals sandboxed environments:
@@ -227,6 +326,8 @@ Internet-facing configurations can reveal sandbox implementations:
 External network tests identify sandboxes with limited, monitored, or simulated internet access.
 
 ## Advanced Evasion Techniques
+
+> `ATT&CK:` T1497.003 (Time Based Evasion), T1027 (Obfuscated Files or Information), T1106 (Native API), T1055 (Process Injection), T1568.002 (Domain Generation Algorithms)
 
 ### Temporal Evasion Strategies
 
@@ -334,7 +435,7 @@ The techniques described in this guide represent the technical landscape of malw
 
 The most sophisticated threats combine temporal evasion, environmental fingerprinting, and external verification to create significant challenges for automated analysis systems. Effective malware analysis requires a multi-faceted approach combining traditional sandboxing with bare-metal analysis, network simulation, and specialized hypervisor technologies.
 
-By understanding the technical details of evasion techniques, security professionals can develop more comprehensive detection and analysis strategies to counter increasingly sophisticated .
+By understanding the technical details of evasion techniques, security professionals can develop more comprehensive detection and analysis strategies to counter increasingly sophisticated threats.
 
 ## Contributing  
 Contributions are welcome! If you have insights, corrections, or additional techniques related to malware evasion, feel free to submit a pull request or open an issue.  
