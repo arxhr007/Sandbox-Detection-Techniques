@@ -8,16 +8,26 @@ jobs:
   build-windows:
     name: Build (Windows, MinGW-w64)
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up MinGW-w64
-        uses: egor-tensin/setup-mingw@v2
+      - name: Set up MSYS2 + MinGW-w64
+        uses: msys2/setup-msys2@v2
         with:
-          platform: x64
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            make
       - name: Build
-        run: mingw32-make
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+        run: make
+      - name: Smoke test
+        # Runner is itself a hypervisor guest, so the detector exits 3 (sandbox).
+        # Accept 0 (genuine) or 3 (sandbox); anything else is a real failure.
+        run: ./sandbox_detector.exe --json --no-wait || test $? -eq 3
+      - uses: actions/upload-artifact@v4
         with:
           name: sandbox_detector
           path: sandbox_detector.exe
