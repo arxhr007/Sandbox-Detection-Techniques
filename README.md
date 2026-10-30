@@ -15,6 +15,10 @@ The cybersecurity landscape features an ongoing battle between security research
 > To maintain technical accuracy, I’ve used terminology that might be challenging for non-tech-savvy readers—apologies! 
 > If any part seems unclear, you can copy and paste it into ChatGPT for a simplified breakdown.🙃
 
+See [SECURITY.md](SECURITY.md) for authorized use scenarios, the real-world
+impact of the techniques documented here, a controlled lab-testing
+procedure, and how to report issues.
+
 ## Table of Contents
 
 - [The Demo Program](#the-demo-program)
