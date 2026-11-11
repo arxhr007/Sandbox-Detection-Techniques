@@ -32,6 +32,7 @@ typedef struct {
     char test[64];
     int weight;
     bool detected;
+    char detail[160]; /* what matched (e.g. "MAC 00-15-5D (Hyper-V)"); "" if none */
 } DetectionResult;
 
 typedef struct {
@@ -50,6 +51,11 @@ void freeSandboxDetector(SandboxDetector* detector);
 /* Record one check result; accumulates weight into score when detected. */
 void addResult(SandboxDetector* detector, const char* category, const char* test,
                int weight, bool detected);
+
+/* Same, with evidence: a short description of what the check matched. */
+void addResultDetail(SandboxDetector* detector, const char* category,
+                     const char* test, int weight, bool detected,
+                     const char* detail);
 
 /* Sum of every registered check's weight (denominator for the score line). */
 int detectorMaxScore(const SandboxDetector* detector);

@@ -20,6 +20,7 @@
 #include <winreg.h>
 #include <cpuid.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #include "detector.h"
 #include "checks.h"
@@ -28,6 +29,19 @@
 #pragma comment(lib, "ws2_32.lib")
 
 /* ------------------------------------------------------------------ helpers */
+
+/* Evidence for the check that fired: runTests clears this before each check
+   and stores it on the result row when the check returns true. Every check
+   reports *what* matched, not just that something did. */
+static char g_lastHit[200];
+
+static bool hitf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_lastHit, sizeof(g_lastHit), fmt, ap);
+    va_end(ap);
+    return true;
+}
 
 static char* getRegValue(HKEY hKey, const char* subKey, const char* valueName) {
     HKEY hSubKey;
@@ -90,12 +104,11 @@ static bool isProcessRunningByName(const char* processName) {
 
 /* ------------------------------------------------------------ system checks */
 
-static bool hasVirtualMacAddress(void) {
-    const char* vmPrefixes[] = {
-        "00-05-69", "00-0C-29", "00-1C-14", "00-50-56", "00-1C-42",
-        "00-03-FF", "00-0F-4B", "00-16-3E", "08-00-27"
-    };
-    int prefixCount = (int)(sizeof(vmPrefixes) / sizeof(vmPrefixes[0]));
+typedef struct { const char* prefix; const char* vendor; } OuiEntry;
+
+/* Scans every adapter's MAC against a OUI table; on a match reports which
+   adapter and which vendor it belongs to. */
+static bool matchMacOui(const OuiEntry* ouis, int count) {
     ULONG bufferSize = 0;
     GetAdaptersAddresses(AF_UNSPEC, 0, NULL, NULL, &bufferSize);
     if (bufferSize == 0) {
@@ -109,41 +122,114 @@ static bool hasVirtualMacAddress(void) {
         free(addresses);
         return false;
     }
+    bool fired = false;
     IP_ADAPTER_ADDRESSES* current = addresses;
-    while (current) {
+    while (current && !fired) {
         if (current->PhysicalAddressLength == 6) {
             char macAddr[18];
             snprintf(macAddr, sizeof(macAddr), "%02X-%02X-%02X-%02X-%02X-%02X",
                 current->PhysicalAddress[0], current->PhysicalAddress[1],
                 current->PhysicalAddress[2], current->PhysicalAddress[3],
                 current->PhysicalAddress[4], current->PhysicalAddress[5]);
-            for (int i = 0; i < prefixCount; i++) {
-                if (strncmp(macAddr, vmPrefixes[i], 8) == 0) {
-                    free(addresses);
-                    return true;
+            for (int i = 0; i < count; i++) {
+                if (strncmp(macAddr, ouis[i].prefix, 8) == 0) {
+                    fired = hitf("adapter MAC %s is a %s prefix",
+                                 macAddr, ouis[i].vendor);
+                    break;
                 }
             }
         }
         current = current->Next;
     }
     free(addresses);
+    return fired;
+}
+
+static bool hasVirtualMacAddress(void) {
+    /* Strong indicators: adapters owned by a hosted hypervisor. */
+    static const OuiEntry vmOuis[] = {
+        {"00-05-69", "VMware"}, {"00-0C-29", "VMware"},
+        {"00-1C-14", "VMware"}, {"00-50-56", "VMware"},
+        {"00-1C-42", "Parallels"}, {"00-0F-4B", "Virtual Iron"},
+        {"00-16-3E", "Xen"}, {"08-00-27", "VirtualBox"},
+        {"52-54-00", "QEMU/KVM"}
+    };
+    return matchMacOui(vmOuis, (int)(sizeof(vmOuis) / sizeof(vmOuis[0])));
+}
+
+/* Hyper-V gets its own weak check: a 00-15-5D adapter only means this host
+   *runs* Hyper-V, which every VBS/WSL2/Docker-enabled Windows 10/11 box does.
+   It says nothing about being inside a VM -- unlike the OUIs above. */
+static bool hasHyperVMacAddress(void) {
+    static const OuiEntry hvOuis[] = {
+        {"00-03-FF", "Hyper-V"}, {"00-15-5D", "Hyper-V"}
+    };
+    return matchMacOui(hvOuis, (int)(sizeof(hvOuis) / sizeof(hvOuis[0])));
+}
+
+/* NEW: disk Identifier strings are also reported under DEVICEMAP for every
+   SCSI port; scanning only port 0 misses secondary/virtual disks. */
+static bool detectScsiIdentifiers(void) {
+    for (int port = 0; port < 4; port++) {
+        char key[192];
+        snprintf(key, sizeof(key),
+                 "HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port %d\\Scsi Bus 0\\"
+                 "Target Id 0\\Logical Unit Id 0", port);
+        char* value = getRegValue(HKEY_LOCAL_MACHINE, key, "Identifier");
+        if (value != NULL) {
+            bool detected = (strstr(value, "VMware") != NULL ||
+                             strstr(value, "VBOX") != NULL ||
+                             strstr(value, "QEMU") != NULL ||
+                             strstr(value, "Msft") != NULL ||
+                             strstr(value, "Virtual") != NULL);
+            if (detected) {
+                bool fired = hitf("port %d Identifier is \"%s\"", port, value);
+                free(value);
+                return fired;
+            }
+            free(value);
+        }
+    }
     return false;
 }
 
-static bool detectVMwareRegistryKeys(void) {
-    const char* vmwareKeys[] = {
-        "SOFTWARE\\VMware, Inc.\\VMware Tools",
-        "HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0"
+/* NEW: VM guest-service keys persist under CurrentControlSet even when the
+   service itself is stopped or disabled, unlike SCM enumeration. */
+static bool detectVirtualServiceKeys(void) {
+    const char* services[] = {
+        "VBoxGuest", "VBoxMouse", "VBoxSF", "VBoxVideo",
+        "VMTools", "vmhgfs", "vmmouse", "vmrawdsk", "vmci",
+        "xen", "xenbus", "xenvif", "xennet", "xensvc",
+        "qemu-ga", "vpc-s3", "vpcubus", "prl_tools", "prl_tg"
     };
-    int keyCount = (int)(sizeof(vmwareKeys) / sizeof(vmwareKeys[0]));
-    for (int i = 0; i < keyCount; i++) {
-        char* value = getRegValue(HKEY_LOCAL_MACHINE, vmwareKeys[i], "Identifier");
-        if (value != NULL) {
-            bool detected = (strstr(value, "VMware") != NULL || strstr(value, "VBOX") != NULL);
-            free(value);
-            if (detected) {
-                return true;
-            }
+    int count = (int)(sizeof(services) / sizeof(services[0]));
+    for (int i = 0; i < count; i++) {
+        char key[160];
+        snprintf(key, sizeof(key),
+                 "SYSTEM\\CurrentControlSet\\Services\\%s", services[i]);
+        if (regKeyExists(HKEY_LOCAL_MACHINE, key)) {
+            return hitf("service key %s exists", services[i]);
+        }
+    }
+    return false;
+}
+
+/* NEW: named pipes owned by sandbox agents and VM IPC endpoints. A pipe that
+   exists but stays busy still fails WaitNamedPipe with ERROR_SEM_TIMEOUT --
+   which is exactly what distinguishes "exists" from "absent" here. */
+static bool detectNamedPipes(void) {
+    const char* pipes[] = {
+        "\\\\.\\pipe\\cuckoo",
+        "\\\\.\\pipe\\VBoxTrayIPC",
+        "\\\\.\\pipe\\VBoxMiniRdDN",
+        "\\\\.\\pipe\\vmware-authdpipe",
+        "\\\\.\\pipe\\vmware-usbarbpipe"
+    };
+    int count = (int)(sizeof(pipes) / sizeof(pipes[0]));
+    for (int i = 0; i < count; i++) {
+        if (WaitNamedPipeA(pipes[i], 0) ||
+            GetLastError() == ERROR_SEM_TIMEOUT) {
+            return hitf("pipe %s exists", pipes[i]);
         }
     }
     return false;
@@ -158,6 +244,8 @@ static bool detectVirtualFiles(void) {
         "C:\\Windows\\System32\\Drivers\\VBoxGuest.sys",
         "C:\\Windows\\System32\\Drivers\\VBoxSF.sys",
         "C:\\Windows\\System32\\Drivers\\VBoxVideo.sys",
+        "C:\\Windows\\System32\\Drivers\\xenvbd.sys",
+        "C:\\Windows\\System32\\Drivers\\xennet.sys",
         "C:\\Windows\\System32\\vboxdisp.dll",
         "C:\\Windows\\System32\\vboxhook.dll",
         "C:\\Windows\\System32\\vboxogl.dll"
@@ -165,7 +253,7 @@ static bool detectVirtualFiles(void) {
     int fileCount = (int)(sizeof(vmFiles) / sizeof(vmFiles[0]));
     for (int i = 0; i < fileCount; i++) {
         if (GetFileAttributesA(vmFiles[i]) != INVALID_FILE_ATTRIBUTES) {
-            return true;
+            return hitf("found %s", vmFiles[i]);
         }
     }
     return false;
@@ -174,12 +262,14 @@ static bool detectVirtualFiles(void) {
 static bool detectVMProcesses(void) {
     const char* vmProcesses[] = {
         "vmtoolsd.exe", "vmwaretray.exe", "vmwareuser.exe",
-        "VBoxService.exe", "VBoxTray.exe"
+        "VBoxService.exe", "VBoxTray.exe", "qemu-ga.exe",
+        "xenservice.exe", "vmsrvc.exe", "vmusrvc.exe",
+        "prl_tools.exe", "prl_cc.exe"
     };
     int processCount = (int)(sizeof(vmProcesses) / sizeof(vmProcesses[0]));
     for (int i = 0; i < processCount; i++) {
         if (isProcessRunningByName(vmProcesses[i])) {
-            return true;
+            return hitf("%s is running", vmProcesses[i]);
         }
     }
     return false;
@@ -210,7 +300,8 @@ static bool detectVirtualServices(void) {
             for (DWORD i = 0; i < servicesReturned; i++) {
                 for (int j = 0; j < serviceCount; j++) {
                     if (strstr(services[i].lpServiceName, vmServices[j]) != NULL) {
-                        result = true;
+                        result = hitf("service %s is registered",
+                                      services[i].lpServiceName);
                         break;
                     }
                 }
@@ -224,32 +315,75 @@ static bool detectVirtualServices(void) {
 }
 
 static bool detectDeviceBios(void) {
-    char buffer[4096] = {0};
-    DWORD size = sizeof(buffer);
-    const char* vmIndicators[] = { "VMware", "VBOX", "Virtual", "Xen", "innotek", "QEMU" };
+    /* {subkey, value} pairs that carry the DMI vendor/product strings. The
+       SystemInformation key is what msinfo32 reports on Win10+, so it catches
+       VMs whose legacy BIOS key is inconclusive. */
+    static const struct { const char* subKey; const char* value; } sources[] = {
+        {"HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemManufacturer"},
+        {"HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemProductName"},
+        {"HARDWARE\\DESCRIPTION\\System\\BIOS", "BIOSVendor"},
+        {"SYSTEM\\ControlSet001\\Control\\SystemInformation", "SystemManufacturer"},
+        {"SYSTEM\\ControlSet001\\Control\\SystemInformation", "SystemProductName"}
+    };
+    const char* vmIndicators[] = {
+        "VMware", "VBOX", "VirtualBox", "Virtual", "Xen",
+        "innotek", "QEMU", "Bochs", "KVM", "BHYVE", "Parallels"
+    };
+    int sourceCount = (int)(sizeof(sources) / sizeof(sources[0]));
     int indicatorCount = (int)(sizeof(vmIndicators) / sizeof(vmIndicators[0]));
-    HKEY hKey;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        if (RegQueryValueExA(hKey, "SystemManufacturer", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
-            for (int i = 0; i < indicatorCount; i++) {
-                if (strstr(buffer, vmIndicators[i]) != NULL) {
-                    RegCloseKey(hKey);
-                    return true;
-                }
+    for (int s = 0; s < sourceCount; s++) {
+        char* value = getRegValue(HKEY_LOCAL_MACHINE, sources[s].subKey, sources[s].value);
+        if (value == NULL) {
+            continue;
+        }
+        for (int i = 0; i < indicatorCount; i++) {
+            if (strstr(value, vmIndicators[i]) != NULL) {
+                bool fired = hitf("%s is \"%s\"", sources[s].value, value);
+                free(value);
+                return fired;
             }
         }
-        size = sizeof(buffer);
-        if (RegQueryValueExA(hKey, "SystemProductName", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
-            for (int i = 0; i < indicatorCount; i++) {
-                if (strstr(buffer, vmIndicators[i]) != NULL) {
-                    RegCloseKey(hKey);
-                    return true;
-                }
-            }
-        }
-        RegCloseKey(hKey);
+        free(value);
     }
     return false;
+}
+
+/* NEW: raw SMBIOS table scan -- the same strings as the registry keys above,
+   but read from the firmware blob itself, so it works even where the registry
+   keys have been cleaned. No admin rights needed for GetSystemFirmwareTable
+   on 'RSMB'. */
+static bool detectSmbiosTables(void) {
+    static const DWORD rsmb = 'R' | ('S' << 8) | ((DWORD)'M' << 16) | ((DWORD)'B' << 24);
+    const char* vmIndicators[] = {
+        "VMware", "VirtualBox", "VBOX", "QEMU", "Bochs",
+        "Xen", "Hyper-V", "KVM", "Parallels", "BHYVE"
+    };
+    int indicatorCount = (int)(sizeof(vmIndicators) / sizeof(vmIndicators[0]));
+    UINT need = GetSystemFirmwareTable(rsmb, 0, NULL, 0);
+    if (need == 0 || need > 1024 * 1024) {
+        return false;
+    }
+    BYTE* blob = (BYTE*)malloc(need);
+    if (blob == NULL) {
+        return false;
+    }
+    if (GetSystemFirmwareTable(rsmb, 0, blob, need) == 0) {
+        free(blob);
+        return false;
+    }
+    bool fired = false;
+    for (UINT off = 0; off < need && !fired; off++) {
+        for (int i = 0; i < indicatorCount; i++) {
+            size_t len = strlen(vmIndicators[i]);
+            if (off + len <= need &&
+                memcmp(blob + off, vmIndicators[i], len) == 0) {
+                fired = hitf("SMBIOS table contains \"%s\"", vmIndicators[i]);
+                break;
+            }
+        }
+    }
+    free(blob);
+    return fired;
 }
 
 static bool checkRegistry(void) {
@@ -258,8 +392,8 @@ static bool checkRegistry(void) {
         const char* subKey;
         const char* value;
     } keys[] = {
-        {HKEY_LOCAL_MACHINE, "HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0", "Identifier"},
         {HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Enum\\SCSI\\Disk&Ven_VMware_&Prod_VMware_Virtual_S", ""},
+        {HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Enum\\SCSI\\Disk&Ven_VBOX&Prod_HARDDISK", ""},
         {HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\CriticalDeviceDatabase\\root#vmwvmcihostdev", ""},
         {HKEY_LOCAL_MACHINE, "SOFTWARE\\VMware, Inc.\\VMware Tools", ""},
         {HKEY_LOCAL_MACHINE, "SOFTWARE\\Oracle\\VirtualBox Guest Additions", ""},
@@ -271,7 +405,7 @@ static bool checkRegistry(void) {
            carry no default value, so a value query would miss them. */
         if (keys[i].value[0] == '\0') {
             if (regKeyExists(keys[i].hKey, keys[i].subKey)) {
-                return true;
+                return hitf("key %s exists", keys[i].subKey);
             }
             continue;
         }
@@ -281,10 +415,13 @@ static bool checkRegistry(void) {
                            strstr(regValue, "VBOX") != NULL ||
                            strstr(regValue, "Virtual") != NULL ||
                            strstr(regValue, "Xen") != NULL);
-            free(regValue);
             if (detected) {
-                return true;
+                bool fired = hitf("%s %s is \"%s\"", keys[i].subKey,
+                                  keys[i].value, regValue);
+                free(regValue);
+                return fired;
             }
+            free(regValue);
         }
     }
     return false;
@@ -294,12 +431,14 @@ static bool checkSandboxArtifacts(void) {
     const char* sandboxArtifacts[] = {
         "C:\\agent\\agent.pyw", "C:\\analysis", "C:\\sandbox", "C:\\Tools\\Wireshark",
         "C:\\iDEFENSE", "C:\\analysis_logs", "C:\\sandbox logs",
-        "C:\\program files\\wireshark", "C:\\program files\\fiddler"
+        "C:\\program files\\wireshark", "C:\\program files\\fiddler",
+        "C:\\program files\\fakenet", "C:\\Tools\\FakeNet",
+        "C:\\Users\\Public\\Downloads\\malware", "C:\\Cape"
     };
     int artifactCount = (int)(sizeof(sandboxArtifacts) / sizeof(sandboxArtifacts[0]));
     for (int i = 0; i < artifactCount; i++) {
         if (GetFileAttributesA(sandboxArtifacts[i]) != INVALID_FILE_ATTRIBUTES) {
-            return true;
+            return hitf("found %s", sandboxArtifacts[i]);
         }
     }
     return false;
@@ -320,7 +459,32 @@ static bool checkSandboxHostnames(void) {
     }
     for (int i = 0; i < nameCount; i++) {
         if (strstr(hostname, sandboxNames[i]) != NULL) {
-            return true;
+            return hitf("hostname \"%s\" matches \"%s\"", hostname, sandboxNames[i]);
+        }
+    }
+    return false;
+}
+
+/* NEW: usernames are as telling as hostnames -- sandboxes ship with canned
+   accounts (cuckoo, analyst), and WDAGUtilityAccount only exists inside
+   Windows Defender Application Guard. */
+static bool checkSuspiciousUsername(void) {
+    char username[256];
+    DWORD size = sizeof(username);
+    if (!GetUserNameA(username, &size)) {
+        return false;
+    }
+    const char* badNames[] = {
+        "cuckoo", "sandbox", "malware", "virus", "analyst", "wdag",
+        "honey", "snort", "john"
+    };
+    int nameCount = (int)(sizeof(badNames) / sizeof(badNames[0]));
+    for (int i = 0; username[i]; i++) {
+        username[i] = (char)tolower((unsigned char)username[i]);
+    }
+    for (int i = 0; i < nameCount; i++) {
+        if (strstr(username, badNames[i]) != NULL) {
+            return hitf("username \"%s\" matches \"%s\"", username, badNames[i]);
         }
     }
     return false;
@@ -340,7 +504,7 @@ static bool detectSandboxDLLs(void) {
     int count = (int)(sizeof(sandboxDlls) / sizeof(sandboxDlls[0]));
     for (int i = 0; i < count; i++) {
         if (GetModuleHandleA(sandboxDlls[i]) != NULL) {
-            return true;
+            return hitf("%s is loaded in this process", sandboxDlls[i]);
         }
     }
     return false;
@@ -355,12 +519,14 @@ static bool detectHardwareConfigurations(void) {
     memStatus.dwLength = sizeof(memStatus);
     GlobalMemoryStatusEx(&memStatus);
     if (sysInfo.dwNumberOfProcessors <= 2 && memStatus.ullTotalPhys < 4000000000LL) {
-        return true;
+        return hitf("%u processors, %.1f GB RAM", sysInfo.dwNumberOfProcessors,
+                    (double)memStatus.ullTotalPhys / 1073741824.0);
     }
     ULARGE_INTEGER freeBytesAvailable, totalNumberOfBytes, totalNumberOfFreeBytes;
     if (GetDiskFreeSpaceExA("C:\\", &freeBytesAvailable, &totalNumberOfBytes, &totalNumberOfFreeBytes)) {
         if (totalNumberOfBytes.QuadPart < 100000000000LL) {
-            return true;
+            return hitf("C: total %.1f GB",
+                        (double)totalNumberOfBytes.QuadPart / 1073741824.0);
         }
     }
     return false;
@@ -369,7 +535,10 @@ static bool detectHardwareConfigurations(void) {
 static bool checkScreenResolution(void) {
     int desktopWidth = GetSystemMetrics(SM_CXSCREEN);
     int desktopHeight = GetSystemMetrics(SM_CYSCREEN);
-    return (desktopWidth < 1024 || desktopHeight < 768);
+    if (desktopWidth < 1024 || desktopHeight < 768) {
+        return hitf("desktop is %dx%d", desktopWidth, desktopHeight);
+    }
+    return false;
 }
 
 static bool checkDriveSize(void) {
@@ -377,7 +546,10 @@ static bool checkDriveSize(void) {
     if (driveType == DRIVE_FIXED) {
         ULARGE_INTEGER freeBytes, totalBytes, totalFreeBytes;
         if (GetDiskFreeSpaceExA("C:\\", &freeBytes, &totalBytes, &totalFreeBytes)) {
-            return (totalBytes.QuadPart < 60000000000LL);
+            if (totalBytes.QuadPart < 60000000000LL) {
+                return hitf("C: total %.1f GB",
+                            (double)totalBytes.QuadPart / 1073741824.0);
+            }
         }
     }
     return false;
@@ -394,11 +566,18 @@ static bool checkMouseMovement(void) {
     if (!GetCursorPos(&pt2)) {
         return false;
     }
-    return (pt1.x == pt2.x && pt1.y == pt2.y);
+    if (pt1.x == pt2.x && pt1.y == pt2.y) {
+        return hitf("cursor unmoved over 500 ms");
+    }
+    return false;
 }
 
 static bool checkSystemUptime(void) {
-    return (GetTickCount64() / 1000 < 60 * 10);
+    ULONGLONG upSecs = GetTickCount64() / 1000;
+    if (upSecs < 60 * 10) {
+        return hitf("uptime %llu s", upSecs);
+    }
+    return false;
 }
 
 static bool checkUserActivity(void) {
@@ -406,7 +585,9 @@ static bool checkUserActivity(void) {
     lastInput.cbSize = sizeof(LASTINPUTINFO);
     if (GetLastInputInfo(&lastInput)) {
         DWORD idleTime = GetTickCount() - lastInput.dwTime;
-        return (idleTime >= 600000);
+        if (idleTime >= 600000) {
+            return hitf("idle for %lu s", (unsigned long)(idleTime / 1000));
+        }
     }
     return false;
 }
@@ -415,11 +596,11 @@ static bool checkRecentFiles(void) {
     char recentPath[MAX_PATH];
     SHGetFolderPathA(NULL, CSIDL_RECENT, NULL, 0, recentPath);
     WIN32_FIND_DATAA findData;
-    char searchPath[MAX_PATH];
+    char searchPath[MAX_PATH + 16];
     snprintf(searchPath, sizeof(searchPath), "%s\\*.lnk", recentPath);
     HANDLE hFind = FindFirstFileA(searchPath, &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
-        return true;
+        return hitf("no .lnk files in Recent");
     }
     int fileCount = 0;
     do {
@@ -430,7 +611,7 @@ static bool checkRecentFiles(void) {
         }
     } while (FindNextFileA(hFind, &findData));
     FindClose(hFind);
-    return true;
+    return hitf("only %d recent .lnk files", fileCount);
 }
 
 /* Detected == no keyboard activity during the polling window (the inverse is a
@@ -444,17 +625,24 @@ static bool checkNoKeyboardActivity(void) {
         }
         Sleep(10);
     }
-    return true;
+    return hitf("no key held during 3 s poll");
 }
 
 static bool detectAdditionalProcesses(void) {
     const char* additionalProcesses[] = {
-        "procmon.exe", "wireshark.exe", "ollydbg.exe", "x64dbg.exe"
+        "procmon.exe", "procmon64.exe", "procxp.exe", "procxp64.exe",
+        "wireshark.exe", "dumpcap.exe", "tshark.exe",
+        "ollydbg.exe", "x32dbg.exe", "x64dbg.exe", "windbg.exe",
+        "idaq.exe", "idaq64.exe", "ida64.exe", "idag.exe",
+        "processhacker.exe", "tcpview.exe", "autoruns.exe",
+        "pestudio.exe", "regshot.exe", "fakenet.exe", "apatedns.exe",
+        "sysanalyzer.exe", "sniff_hit.exe", "joeboxcontrol.exe",
+        "joeboxserver.exe"
     };
     int count = (int)(sizeof(additionalProcesses) / sizeof(additionalProcesses[0]));
     for (int i = 0; i < count; i++) {
         if (isProcessRunningByName(additionalProcesses[i])) {
-            return true;
+            return hitf("%s is running", additionalProcesses[i]);
         }
     }
     return false;
@@ -463,36 +651,30 @@ static bool detectAdditionalProcesses(void) {
 /* ----------------------------------------------------------- network checks */
 
 static bool detectDebuggingPorts(void) {
+    /* Ports historically held open by debugger/agent stubs on loopback. */
+    const USHORT ports[] = { 1016, 5002 };
+    int portCount = (int)(sizeof(ports) / sizeof(ports[0]));
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return false;
     }
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(1016);
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock != INVALID_SOCKET) {
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+    bool fired = false;
+    for (int i = 0; i < portCount && !fired; i++) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(ports[i]);
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock != INVALID_SOCKET) {
+            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                fired = hitf("loopback port %u accepts connections", ports[i]);
+            }
             closesocket(sock);
-            WSACleanup();
-            return true;
         }
-        closesocket(sock);
-    }
-    addr.sin_port = htons(5002);
-    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock != INVALID_SOCKET) {
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-            closesocket(sock);
-            WSACleanup();
-            return true;
-        }
-        closesocket(sock);
     }
     WSACleanup();
-    return false;
+    return fired;
 }
 
 /* ----------------------------------------------------------- runtime checks */
@@ -500,7 +682,9 @@ static bool detectDebuggingPorts(void) {
 static bool isRunningInHypervisor(void) {
     unsigned int eax, ebx, ecx, edx;
     if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
-        return (ecx >> 31) & 1;
+        if ((ecx >> 31) & 1) {
+            return hitf("CPUID.1:ECX bit 31 is set");
+        }
     }
     return false;
 }
@@ -523,7 +707,7 @@ static bool detectHypervisorVendor(void) {
     int count = (int)(sizeof(known) / sizeof(known[0]));
     for (int i = 0; i < count; i++) {
         if (memcmp(vendor, known[i], 12) == 0) {
-            return true;
+            return hitf("vendor leaf reports \"%s\"", vendor);
         }
     }
     return false;
@@ -532,11 +716,11 @@ static bool detectHypervisorVendor(void) {
 /* NEW: debugger attached to this process. */
 static bool detectDebuggerPresent(void) {
     if (IsDebuggerPresent()) {
-        return true;
+        return hitf("IsDebuggerPresent is true");
     }
     BOOL remote = FALSE;
     if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote) {
-        return true;
+        return hitf("a remote debugger is attached");
     }
     return false;
 }
@@ -548,26 +732,31 @@ static bool detectHardwareBreakpoints(void) {
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     if (GetThreadContext(GetCurrentThread(), &ctx)) {
         if (ctx.Dr0 != 0 || ctx.Dr1 != 0 || ctx.Dr2 != 0 || ctx.Dr3 != 0) {
-            return true;
+            return hitf("Dr0-Dr3 = %p %p %p %p", (void*)ctx.Dr0,
+                        (void*)ctx.Dr1, (void*)ctx.Dr2, (void*)ctx.Dr3);
         }
     }
     return false;
 }
 
-/* NEW: inline hooks on ntdll syscall stubs -- a JMP as the first opcode instead
-   of the normal "mov r10, rcx" (0x4C) prologue indicates interception. */
+/* Inline hooks on ntdll syscall stubs -- a JMP as the first opcode instead
+   of the normal "mov r10, rcx" (0x4C) prologue indicates interception, and a
+   breakpoint byte (0xCC) is a planted int3. */
 static bool detectApiHooks(void) {
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
     if (ntdll == NULL) {
         return false;
     }
-    const char* funcs[] = { "NtCreateFile", "NtProtectVirtualMemory", "NtWriteVirtualMemory" };
+    const char* funcs[] = {
+        "NtCreateFile", "NtProtectVirtualMemory", "NtWriteVirtualMemory",
+        "NtAllocateVirtualMemory", "NtCreateThreadEx"
+    };
     int count = (int)(sizeof(funcs) / sizeof(funcs[0]));
     for (int i = 0; i < count; i++) {
         unsigned char* fn = (unsigned char*)GetProcAddress(ntdll, funcs[i]);
         if (fn != NULL) {
-            if (fn[0] == 0xE9 || fn[0] == 0xEB) { /* jmp rel32 / jmp rel8 */
-                return true;
+            if (fn[0] == 0xE9 || fn[0] == 0xEB || fn[0] == 0xCC) {
+                return hitf("%s starts with byte 0x%02X", funcs[i], fn[0]);
             }
         }
     }
@@ -584,7 +773,10 @@ static bool detectRedPillIDT(void) {
     unsigned long base;
     memcpy(&base, &idtr[2], sizeof(base));
     /* VMware historically placed the IDT high (0xFFxxxxxx). */
-    return ((base >> 24) == 0xFF);
+    if ((base >> 24) == 0xFF) {
+        return hitf("IDT base is 0x%08lx", base);
+    }
+    return false;
 #else
     /* On x86_64 the IDT base is not a reliable single-value discriminator. */
     return false;
@@ -596,42 +788,60 @@ static bool checkTimeAcceleration(void) {
     Sleep(3000);
     time_t end = time(NULL);
     time_t elapsed = end - start;
-    return (elapsed < 2 || elapsed > 4);
+    if (elapsed < 2 || elapsed > 4) {
+        return hitf("3 s sleep measured %ld s of wall time", (long)elapsed);
+    }
+    return false;
 }
 
 /* --------------------------------------------------------------- test table */
 
+/* Records one check result with its evidence: g_lastHit is cleared, the check
+   runs, and if it fired the detail string is stored on the row. */
+#define ADD_CHECK(category, test, weight, fn)                              \
+    do {                                                                   \
+        g_lastHit[0] = '\0';                                               \
+        bool _fired = (fn)();                                              \
+        addResultDetail(detector, category, test, weight, _fired,          \
+                        _fired ? g_lastHit : "");                          \
+    } while (0)
+
 void runTests(SandboxDetector* detector) {
     /* Runtime */
-    addResult(detector, "Runtime", "Time Acceleration", WEIGHT_MEDIUM, checkTimeAcceleration());
-    addResult(detector, "Runtime", "Hypervisor Bit (CPUID)", WEIGHT_MEDIUM, isRunningInHypervisor());
-    addResult(detector, "Runtime", "Hypervisor Vendor (CPUID)", WEIGHT_STRONG, detectHypervisorVendor());
-    addResult(detector, "Runtime", "Debugger Present", WEIGHT_MEDIUM, detectDebuggerPresent());
-    addResult(detector, "Runtime", "Hardware Breakpoints", WEIGHT_MEDIUM, detectHardwareBreakpoints());
-    addResult(detector, "Runtime", "ntdll API Hooks", WEIGHT_MEDIUM, detectApiHooks());
-    addResult(detector, "Runtime", "Red Pill (IDT)", WEIGHT_WEAK, detectRedPillIDT());
+    ADD_CHECK("Runtime", "Time Acceleration", WEIGHT_MEDIUM, checkTimeAcceleration);
+    ADD_CHECK("Runtime", "Hypervisor Bit (CPUID)", WEIGHT_MEDIUM, isRunningInHypervisor);
+    ADD_CHECK("Runtime", "Hypervisor Vendor (CPUID)", WEIGHT_STRONG, detectHypervisorVendor);
+    ADD_CHECK("Runtime", "Debugger Present", WEIGHT_MEDIUM, detectDebuggerPresent);
+    ADD_CHECK("Runtime", "Hardware Breakpoints", WEIGHT_MEDIUM, detectHardwareBreakpoints);
+    ADD_CHECK("Runtime", "ntdll API Hooks", WEIGHT_MEDIUM, detectApiHooks);
+    ADD_CHECK("Runtime", "Red Pill (IDT)", WEIGHT_WEAK, detectRedPillIDT);
     /* System */
-    addResult(detector, "System", "VM Registry Keys", WEIGHT_STRONG, detectVMwareRegistryKeys());
-    addResult(detector, "System", "Virtual Files", WEIGHT_STRONG, detectVirtualFiles());
-    addResult(detector, "System", "Virtual Processes", WEIGHT_STRONG, detectVMProcesses());
-    addResult(detector, "System", "Virtual Services", WEIGHT_STRONG, detectVirtualServices());
-    addResult(detector, "System", "BIOS/Device Information", WEIGHT_STRONG, detectDeviceBios());
-    addResult(detector, "System", "Registry Indicators", WEIGHT_STRONG, checkRegistry());
-    addResult(detector, "System", "Sandbox Artifacts", WEIGHT_MEDIUM, checkSandboxArtifacts());
-    addResult(detector, "System", "Sandbox Hostnames", WEIGHT_MEDIUM, checkSandboxHostnames());
-    addResult(detector, "System", "Injected Sandbox DLLs", WEIGHT_MEDIUM, detectSandboxDLLs());
+    ADD_CHECK("System", "Virtual Files", WEIGHT_STRONG, detectVirtualFiles);
+    ADD_CHECK("System", "Virtual Processes", WEIGHT_STRONG, detectVMProcesses);
+    ADD_CHECK("System", "Virtual Services", WEIGHT_STRONG, detectVirtualServices);
+    ADD_CHECK("System", "VM Service Registry Keys", WEIGHT_STRONG, detectVirtualServiceKeys);
+    ADD_CHECK("System", "BIOS/Device Information", WEIGHT_STRONG, detectDeviceBios);
+    ADD_CHECK("System", "SMBIOS Firmware Strings", WEIGHT_STRONG, detectSmbiosTables);
+    ADD_CHECK("System", "SCSI Disk Identifiers", WEIGHT_STRONG, detectScsiIdentifiers);
+    ADD_CHECK("System", "Registry Indicators", WEIGHT_STRONG, checkRegistry);
+    ADD_CHECK("System", "Sandbox Artifacts", WEIGHT_MEDIUM, checkSandboxArtifacts);
+    ADD_CHECK("System", "Named Pipe Artifacts", WEIGHT_MEDIUM, detectNamedPipes);
+    ADD_CHECK("System", "Sandbox Hostnames", WEIGHT_MEDIUM, checkSandboxHostnames);
+    ADD_CHECK("System", "Suspicious Username", WEIGHT_WEAK, checkSuspiciousUsername);
+    ADD_CHECK("System", "Injected Sandbox DLLs", WEIGHT_MEDIUM, detectSandboxDLLs);
     /* Hardware */
-    addResult(detector, "Hardware", "Virtual MAC Address", WEIGHT_STRONG, hasVirtualMacAddress());
-    addResult(detector, "Hardware", "Limited Hardware Configuration", WEIGHT_WEAK, detectHardwareConfigurations());
-    addResult(detector, "Hardware", "Low Screen Resolution", WEIGHT_WEAK, checkScreenResolution());
-    addResult(detector, "Hardware", "Small Disk Drive", WEIGHT_WEAK, checkDriveSize());
+    ADD_CHECK("Hardware", "Virtual MAC Address", WEIGHT_STRONG, hasVirtualMacAddress);
+    ADD_CHECK("Hardware", "Hyper-V Network Adapter", WEIGHT_WEAK, hasHyperVMacAddress);
+    ADD_CHECK("Hardware", "Limited Hardware Configuration", WEIGHT_WEAK, detectHardwareConfigurations);
+    ADD_CHECK("Hardware", "Low Screen Resolution", WEIGHT_WEAK, checkScreenResolution);
+    ADD_CHECK("Hardware", "Small Disk Drive", WEIGHT_WEAK, checkDriveSize);
     /* User */
-    addResult(detector, "User", "No Mouse Movement", WEIGHT_WEAK, checkMouseMovement());
-    addResult(detector, "User", "Short System Uptime", WEIGHT_WEAK, checkSystemUptime());
-    addResult(detector, "User", "No User Activity", WEIGHT_WEAK, checkUserActivity());
-    addResult(detector, "User", "Few Recent Files", WEIGHT_WEAK, checkRecentFiles());
-    addResult(detector, "User", "Additional Security Processes", WEIGHT_MEDIUM, detectAdditionalProcesses());
-    addResult(detector, "User", "No Keyboard Activity", WEIGHT_WEAK, checkNoKeyboardActivity());
+    ADD_CHECK("User", "No Mouse Movement", WEIGHT_WEAK, checkMouseMovement);
+    ADD_CHECK("User", "Short System Uptime", WEIGHT_WEAK, checkSystemUptime);
+    ADD_CHECK("User", "No User Activity", WEIGHT_WEAK, checkUserActivity);
+    ADD_CHECK("User", "Few Recent Files", WEIGHT_WEAK, checkRecentFiles);
+    ADD_CHECK("User", "Additional Security Processes", WEIGHT_MEDIUM, detectAdditionalProcesses);
+    ADD_CHECK("User", "No Keyboard Activity", WEIGHT_WEAK, checkNoKeyboardActivity);
     /* Network */
-    addResult(detector, "Network", "Debugging Ports", WEIGHT_MEDIUM, detectDebuggingPorts());
+    ADD_CHECK("Network", "Debugging Ports", WEIGHT_MEDIUM, detectDebuggingPorts);
 }

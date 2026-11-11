@@ -71,6 +71,16 @@ static void test_threshold_override(void) {
     freeSandboxDetector(d);
 }
 
+static void test_detail_stored(void) {
+    SandboxDetector* d = newSandboxDetector();
+    addResultDetail(d, "Hardware", "mac", WEIGHT_STRONG, true,
+                    "MAC 00-15-5D (Hyper-V)");
+    CHECK(strcmp(d->results[0].detail, "MAC 00-15-5D (Hyper-V)") == 0);
+    addResult(d, "Hardware", "y", WEIGHT_WEAK, false); /* no detail -> "" */
+    CHECK(d->results[1].detail[0] == '\0');
+    freeSandboxDetector(d);
+}
+
 static void test_growth_past_capacity(void) {
     SandboxDetector* d = newSandboxDetector();
     int n = 50; /* initial capacity is 20 -> forces at least one realloc */
@@ -88,6 +98,7 @@ int main(void) {
     test_score_accumulates_only_detected();
     test_verdict_boundary();
     test_threshold_override();
+    test_detail_stored();
     test_growth_past_capacity();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

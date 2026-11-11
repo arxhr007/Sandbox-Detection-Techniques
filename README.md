@@ -90,17 +90,21 @@ $ ./sandbox_detector.exe --json --no-wait | jq .is_sandbox
 
 ### How the Verdict Works (Weighted Scoring)
 
-Rather than "any single hit = sandbox" (which false-positives on genuine low-end machines), each of the 27 checks carries a **weight** and only contributes when it fires:
+Rather than "any single hit = sandbox" (which false-positives on genuine low-end machines), each of the 32 checks carries a **weight** and only contributes when it fires:
 
 | Weight | Meaning | Examples |
 |---|---|---|
-| **3 — strong** | near-definitive VM/analysis artifact | VM driver files, VM processes/services, VM MAC prefix, BIOS vendor strings, VM registry keys, hypervisor CPUID *vendor* string |
-| **2 — medium** | suggestive signal | sandbox artifacts/hostnames, injected sandbox DLLs, debugger present, hardware breakpoints, ntdll API hooks, debugger ports, analysis tools, timing anomaly, hypervisor CPUID bit* |
-| **1 — weak** | environmental hint only | low RAM/CPU, small disk, low resolution, no mouse/keyboard activity, short uptime, few recent files, Red Pill/IDT |
+| **3 — strong** | near-definitive VM/analysis artifact | VM driver files, VM processes/services/service keys, VM MAC prefix, BIOS/SMBIOS vendor strings, VM registry keys, SCSI disk identifiers, hypervisor CPUID *vendor* string |
+| **2 — medium** | suggestive signal | sandbox artifacts/hostnames/named pipes, injected sandbox DLLs, debugger present, hardware breakpoints, ntdll API hooks, debugger ports, analysis tools, timing anomaly, hypervisor CPUID bit* |
+| **1 — weak** | environmental hint only | low RAM/CPU, small disk, low resolution, no mouse/keyboard activity, short uptime, few recent files, suspicious username, Hyper-V host adapter†, Red Pill/IDT |
 
-The detected weights are summed; the verdict fires when the score reaches the tunable `SANDBOX_SCORE_THRESHOLD` (default **5**). This requires corroboration — e.g. one strong signal plus a medium, not a lone weak hint — before declaring a sandbox.
+The detected weights are summed; the verdict fires when the score reaches the tunable `SANDBOX_SCORE_THRESHOLD` (default **5**, override with `--threshold`). This requires corroboration — e.g. one strong signal plus a medium, not a lone weak hint — before declaring a sandbox.
 
 > \*The hypervisor CPUID bit is only weight 2 on purpose: modern Windows 11 sets it via Hyper-V/VBS on real hardware, so it is not definitive on its own.
+>
+> †Hyper-V OUI adapters (`00-15-5D`, `00-03-FF`) are also weak for the same reason: every VBS/WSL2/Docker-enabled Windows 10/11 host shows one. On such a machine run unattended, the noise floor (bit + adapter + no-activity checks) sits right at the boundary — raise `--threshold` to 7+ there, or treat the score's *details* as the answer rather than the verdict.
+
+Every fired check also prints a `-- detail` line naming the exact artifact that matched, so a "Detected!" is always inspectable instead of a bare boolean.
 
 ### Sample Output
 
@@ -109,18 +113,19 @@ The detected weights are summed; the verdict fires when the score reaches the tu
 
 --- Runtime Tests ---
 Time Acceleration                (weight 2): Not detected
-Hypervisor Bit (CPUID)           (weight 2): Detected!
-Hypervisor Vendor (CPUID)        (weight 3): Detected!
+Hypervisor Bit (CPUID)           (weight 2): Detected!  -- CPUID.1:ECX bit 31 is set
+Hypervisor Vendor (CPUID)        (weight 3): Not detected
 ...
 --- Hardware Tests ---
-Virtual MAC Address              (weight 3): Detected!
+Virtual MAC Address              (weight 3): Not detected
+Hyper-V Network Adapter          (weight 1): Detected!  -- adapter MAC 00-15-5D-F8-4A-C1 is a Hyper-V prefix
 ...
 
 ==== Overall Assessment ====
-Weighted score: 13 / 53 (threshold 5)
+Weighted score: 5 / 63 (threshold 5)
 WARNING: System appears to be running in a sandbox or virtual environment!
 
-Detection ratio: 7/27 checks fired (25%)
+Detection ratio: 4/32 checks fired (12%)
 ```
 
 ### Code &harr; Technique Mapping
@@ -137,14 +142,20 @@ Which functions in `src/checks.c` implement which techniques from this guide:
 | Inline API hooks on ntdll stubs | `detectApiHooks` | 2 | T1622 / T1497.001 |
 | Injected sandbox/monitor DLLs | `detectSandboxDLLs` | 2 | T1497.001 |
 | Timing / time-acceleration anomaly | `checkTimeAcceleration` | 2 | T1497.003 |
-| VM registry keys / SCSI identifiers | `detectVMwareRegistryKeys`, `checkRegistry` | 3 | T1497.001 / T1082 |
+| VM registry keys | `checkRegistry` | 3 | T1497.001 / T1082 |
+| SCSI disk Identifier strings (ports 0–3) | `detectScsiIdentifiers` | 3 | T1497.001 / T1082 |
+| VM guest-service registry keys | `detectVirtualServiceKeys` | 3 | T1497.001 / T1082 |
 | VM driver / DLL files present | `detectVirtualFiles` | 3 | T1497.001 |
 | VM processes (vmtoolsd, VBoxService) | `detectVMProcesses` | 3 | T1497.001 / T1057 |
 | VM services (VMTools, VBoxService) | `detectVirtualServices` | 3 | T1497.001 |
 | BIOS / manufacturer strings | `detectDeviceBios` | 3 | T1497.001 / T1082 |
+| Raw SMBIOS firmware strings (`RSMB`) | `detectSmbiosTables` | 3 | T1497.001 / T1082 |
 | Sandbox artifact paths | `checkSandboxArtifacts` | 2 | T1497.001 |
+| Sandbox agent named pipes | `detectNamedPipes` | 2 | T1497.001 |
 | Sandbox hostnames | `checkSandboxHostnames` | 2 | T1497.001 / T1082 |
+| Suspicious usernames (cuckoo, WDAG, analyst) | `checkSuspiciousUsername` | 1 | T1497.001 / T1082 |
 | VM MAC address prefixes | `hasVirtualMacAddress` | 3 | T1497.001 |
+| Hyper-V host adapter prefix (WSL/VBS noise) | `hasHyperVMacAddress` | 1 | T1497.001 |
 | Low RAM / CPU / disk | `detectHardwareConfigurations`, `checkDriveSize` | 1 | T1497.001 / T1082 |
 | Low screen resolution | `checkScreenResolution` | 1 | T1497.001 |
 | Mouse / keyboard / idle / uptime / recent-files | `checkMouseMovement`, `checkNoKeyboardActivity`, `checkUserActivity`, `checkSystemUptime`, `checkRecentFiles` | 1 | T1497.002 |

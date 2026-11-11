@@ -34,8 +34,9 @@ void freeSandboxDetector(SandboxDetector* detector) {
     free(detector);
 }
 
-void addResult(SandboxDetector* detector, const char* category, const char* test,
-               int weight, bool detected) {
+void addResultDetail(SandboxDetector* detector, const char* category,
+                     const char* test, int weight, bool detected,
+                     const char* detail) {
     if (detector->resultCount >= detector->capacity) {
         int newCapacity = detector->capacity * 2;
         DetectionResult* grown = (DetectionResult*)realloc(detector->results,
@@ -49,12 +50,18 @@ void addResult(SandboxDetector* detector, const char* category, const char* test
     DetectionResult* r = &detector->results[detector->resultCount];
     snprintf(r->category, sizeof(r->category), "%s", category);
     snprintf(r->test, sizeof(r->test), "%s", test);
+    snprintf(r->detail, sizeof(r->detail), "%s", detail != NULL ? detail : "");
     r->weight = weight;
     r->detected = detected;
     detector->resultCount++;
     if (detected) {
         detector->score += weight;
     }
+}
+
+void addResult(SandboxDetector* detector, const char* category, const char* test,
+               int weight, bool detected) {
+    addResultDetail(detector, category, test, weight, detected, "");
 }
 
 int detectorMaxScore(const SandboxDetector* detector) {
@@ -78,9 +85,13 @@ void printResults(const SandboxDetector* detector, bool quiet) {
             printf("--- %s Tests ---\n", categories[i]);
             for (int j = 0; j < detector->resultCount; j++) {
                 if (strcmp(detector->results[j].category, categories[i]) == 0) {
-                    const char* status = detector->results[j].detected ? "Detected!" : "Not detected";
-                    printf("%-32s (weight %d): %s\n",
-                           detector->results[j].test, detector->results[j].weight, status);
+                    const DetectionResult* r = &detector->results[j];
+                    const char* status = r->detected ? "Detected!" : "Not detected";
+                    printf("%-32s (weight %d): %s", r->test, r->weight, status);
+                    if (r->detected && r->detail[0] != '\0') {
+                        printf("  -- %s", r->detail);
+                    }
+                    printf("\n");
                 }
             }
             printf("\n");
@@ -139,9 +150,10 @@ void printResultsJson(const SandboxDetector* detector) {
         printJsonString(r->category);
         printf(", \"test\": ");
         printJsonString(r->test);
-        printf(", \"weight\": %d, \"detected\": %s}%s\n",
-               r->weight, r->detected ? "true" : "false",
-               (i + 1 < detector->resultCount) ? "," : "");
+        printf(", \"weight\": %d, \"detected\": %s, \"detail\": ",
+               r->weight, r->detected ? "true" : "false");
+        printJsonString(r->detail);
+        printf("}%s\n", (i + 1 < detector->resultCount) ? "," : "");
     }
     printf("  ],\n");
     printf("  \"score\": %d,\n", detector->score);
